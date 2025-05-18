@@ -1,0 +1,7 @@
+python-dotenv
+easyocr
+requests
+PyPDF2
+pdf2image
+Pillow
+openai

@@ -1,0 +1,36 @@
+# Entornos virtuales de Python
+venv/
+*/venv/
+env/
+*/env/
+.env
+*.pyc
+*~
+__pycache__/
+.DS_Store
+Thumbs.db
+
+# Archivos de configuración local que no deben ser versionados
+# (ya manejamos las API keys con .env, pero si tuvieras otros...)
+# local_settings.py
+
+# Directorios de salida generados por la aplicación
+OCRename_Resultados/
+# input_pdfs/ # Considera si quieres versionar PDFs de ejemplo o no
+
+# Archivos de log
+*.log
+ocrename_activity.log* # Para cubrir rotaciones si las hubiera
+
+# Archivos de depuración generados por el script
+debug_*.txt
+
+# Carpeta de descarga de Poppler (si la creaste con el .bat)
+poppler_download/
+poppler_manual/ # Si extrajiste Poppler manualmente dentro del proyecto
+
+# Archivos específicos de IDEs (opcional, pero buena práctica)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
