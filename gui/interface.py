@@ -4,10 +4,9 @@ import threading
 import os
 import logging
 from typing import List, Dict, Optional
-import subprocess # Para abrir carpetas
-import sys        # Para identificar el sistema operativo
 
-from pdf2image import convert_from_path # Asumiendo que sigue siendo necesario aquí para el tipo manuscrito
+from PIL import Image, ImageTk # Para la vista previa de imagen
+from pdf2image import convert_from_path # Para obtener la imagen para vista previa y HTR/Visión
 
 from utils.logger import get_app_logger
 from core.pdf_processor import PDFProcessor
@@ -20,20 +19,25 @@ app_logger = get_app_logger()
 class AppGUI:
     def __init__(self, root_tk: tk.Tk):
         self.root = root_tk
-        self.root.title("OCRename v0.3 - Abrir Resultados") # Actualizar versión/título
-        self.root.geometry("800x700") 
+        self.root.title("OCRename v0.3 - Vista Previa y Selector")
+        self.root.geometry("1100x750") # Más ancho para la vista previa
 
         self.pdf_processor: Optional[PDFProcessor] = None
         self.ai_integrator = AIIntegrator()
-        self.file_manager = FileManager() # FileManager crea las carpetas en su __init__
+        self.file_manager = FileManager()
 
         self.selected_files: List[str] = []
         self.is_processing = False
+
+        # Para la vista previa de imagen
+        self.current_preview_pil_image: Optional[Image.Image] = None
+        self.current_preview_tk_image: Optional[ImageTk.PhotoImage] = None
 
         self._setup_ui()
         self._initialize_ocr_engine_async()
 
     def _initialize_ocr_engine_async(self):
+        # ... (sin cambios desde la última versión) ...
         self.status_var.set("Inicializando motor OCR (EasyOCR)... Esto puede tardar unos segundos.")
         self.root.update_idletasks()
         
@@ -54,95 +58,110 @@ class AppGUI:
         
         threading.Thread(target=init_task, daemon=True).start()
 
+
     def _update_api_status_label(self):
+        # ... (sin cambios) ...
         if self.ai_integrator.is_api_configured_and_client_valid():
-            self.api_status_var.set("DeepSeek (OpenRouter): API Key Configurada")
+            self.api_status_var.set("DeepSeek/Llama (OpenRouter): API Key Configurada")
             self.api_status_label.config(foreground="green")
         else:
-            self.api_status_var.set("DeepSeek (OpenRouter): API Key NO Configurada (ver .env)")
+            self.api_status_var.set("DeepSeek/Llama (OpenRouter): API Key NO Configurada (ver .env)")
             self.api_status_label.config(foreground="red")
 
+
     def _setup_ui(self):
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Frame principal que contendrá el panel izquierdo (controles) y el panel derecho (vista previa)
+        top_level_frame = ttk.Frame(self.root, padding="5")
+        top_level_frame.pack(fill=tk.BOTH, expand=True)
 
-        # --- Selección de Archivos ---
-        files_frame = ttk.LabelFrame(main_frame, text="1. Selección de Archivos PDF", padding="10")
-        files_frame.pack(fill=tk.X, pady=5)
+        # Panel Izquierdo para Controles
+        left_panel = ttk.Frame(top_level_frame, padding="5")
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 5))
+
+        # Panel Derecho para Vista Previa de Imagen
+        right_panel = ttk.LabelFrame(top_level_frame, text="Vista Previa (1ra Página)", padding="10")
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.preview_image_label = ttk.Label(right_panel)
+        self.preview_image_label.pack(padx=5, pady=5, fill=tk.BOTH, expand=True)
+        self.preview_image_label.bind('<Configure>', self._on_preview_resize) # Para re-escalar si el label cambia
+
+
+        # --- Contenido del Panel Izquierdo ---
+        # 1. Selección de Archivos
+        files_frame = ttk.LabelFrame(left_panel, text="1. Selección de Archivos PDF", padding="10")
+        files_frame.pack(fill=tk.X, pady=5, anchor="n") # anchor="n" para que se quede arriba
+        
         self.select_button = ttk.Button(files_frame, text="Seleccionar Archivos", command=self._select_files)
-        self.select_button.pack(side=tk.LEFT, padx=5)
+        self.select_button.pack(side=tk.LEFT, padx=5, pady=5)
         self.clear_button = ttk.Button(files_frame, text="Limpiar Lista", command=self._clear_files)
-        self.clear_button.pack(side=tk.LEFT, padx=5)
-        self.files_listbox_frame = ttk.Frame(files_frame)
-        self.files_listbox_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.files_listbox = tk.Listbox(self.files_listbox_frame, selectmode=tk.EXTENDED, height=6, width=70)
-        self.files_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        listbox_scrollbar = ttk.Scrollbar(self.files_listbox_frame, orient=tk.VERTICAL, command=self.files_listbox.yview)
-        listbox_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.files_listbox.config(yscrollcommand=listbox_scrollbar.set)
+        self.clear_button.pack(side=tk.LEFT, padx=5, pady=5)
+        
+        self.files_listbox = tk.Listbox(files_frame, selectmode=tk.SINGLE, height=8, width=55) # Cambiado a SINGLE y un poco más alto
+        self.files_listbox.pack(pady=5, fill=tk.X, expand=True)
+        self.files_listbox.bind('<<ListboxSelect>>', self._on_file_select_in_listbox) # Para actualizar vista previa
 
-        # --- Selección de Tipo de Documento ---
-        doc_type_frame = ttk.LabelFrame(main_frame, text="2. Seleccione el Tipo de Documento a Procesar", padding="10")
-        doc_type_frame.pack(fill=tk.X, pady=(10,5), padx=0)
+        # 2. Selección de Tipo de Documento
+        doc_type_frame = ttk.LabelFrame(left_panel, text="2. Tipo de Documento", padding="10")
+        doc_type_frame.pack(fill=tk.X, pady=5, anchor="n")
         self.doc_type_var = tk.StringVar(value="pendiente_impreso")
-        rb_pendiente = ttk.Radiobutton(doc_type_frame, text="Formato A: Acta Impresa (ej. SUPLY MEDICAL)", 
+        rb_pendiente = ttk.Radiobutton(doc_type_frame, text="Formato A: Acta Impresa (ej. SUPLY)", 
                                    variable=self.doc_type_var, value="pendiente_impreso")
-        rb_pendiente.pack(anchor=tk.W, padx=10, pady=2)
-        rb_entregado = ttk.Radiobutton(doc_type_frame, text="Formato B: Acta Manuscrita en Esquina (ej. E.S.E. UNIDAD)", 
+        rb_pendiente.pack(anchor=tk.W, padx=5, pady=2)
+        rb_entregado = ttk.Radiobutton(doc_type_frame, text="Formato B: Acta Manuscrita (ej. E.S.E.)", 
                                   variable=self.doc_type_var, value="entregado_manuscrito")
-        rb_entregado.pack(anchor=tk.W, padx=10, pady=2)
+        rb_entregado.pack(anchor=tk.W, padx=5, pady=2)
 
-        # --- Controles de Procesamiento y Resultados ---
-        process_controls_frame = ttk.LabelFrame(main_frame, text="3. Procesamiento y Resultados", padding="10")
-        process_controls_frame.pack(fill=tk.X, pady=10)
-        
+        # 3. Procesamiento
+        process_controls_frame = ttk.LabelFrame(left_panel, text="3. Procesamiento", padding="10")
+        process_controls_frame.pack(fill=tk.X, pady=5, anchor="n")
         self.process_button = ttk.Button(process_controls_frame, text="Iniciar Procesamiento", command=self._start_processing_thread, state=tk.DISABLED)
-        self.process_button.pack(pady=(5,2))
-
-        self.open_results_button = ttk.Button(process_controls_frame, text="Abrir Carpeta de Resultados", command=self._open_results_folder, state=tk.DISABLED)
-        # Habilitar el botón de abrir resultados si las carpetas ya existen (FileManager las crea en __init__)
-        if os.path.isdir(self.file_manager.output_base):
-            self.open_results_button.config(state=tk.NORMAL)
-        self.open_results_button.pack(pady=(2,5))
+        self.process_button.pack(pady=5)
         
-        # --- Progreso ---
-        progress_frame = ttk.LabelFrame(main_frame, text="4. Progreso Detallado", padding="10")
-        progress_frame.pack(fill=tk.X, pady=5)
+        # 4. Progreso Detallado
+        progress_frame = ttk.LabelFrame(left_panel, text="4. Progreso Detallado", padding="10")
+        progress_frame.pack(fill=tk.X, pady=5, anchor="n")
+        # ... (widgets de progreso como antes, pero dentro de left_panel) ...
         ttk.Label(progress_frame, text="Archivo Actual:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
         self.current_file_var = tk.StringVar(value="N/A")
-        ttk.Label(progress_frame, textvariable=self.current_file_var, width=60).grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=5)
-        ttk.Label(progress_frame, text="Progreso OCR (Archivo):").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
-        self.ocr_progressbar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=400, mode='determinate')
+        ttk.Label(progress_frame, textvariable=self.current_file_var, width=40).grid(row=0, column=1, columnspan=2, sticky=tk.W, padx=5)
+
+        ttk.Label(progress_frame, text="Progreso OCR:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        self.ocr_progressbar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=250, mode='determinate')
         self.ocr_progressbar.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=2)
         self.ocr_progress_var = tk.StringVar(value="0%")
         ttk.Label(progress_frame, textvariable=self.ocr_progress_var).grid(row=1, column=2, sticky=tk.W, padx=5)
+        
         ttk.Label(progress_frame, text="Progreso General:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
-        self.overall_progressbar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=400, mode='determinate')
+        self.overall_progressbar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=250, mode='determinate')
         self.overall_progressbar.grid(row=2, column=1, sticky=tk.EW, padx=5, pady=2)
         self.overall_progress_var = tk.StringVar(value="0/0 (0%)")
         ttk.Label(progress_frame, textvariable=self.overall_progress_var).grid(row=2, column=2, sticky=tk.W, padx=5)
         progress_frame.columnconfigure(1, weight=1)
 
-        # --- Estado y Logs ---
-        status_log_frame = ttk.LabelFrame(main_frame, text="5. Estado y Mensajes", padding="10")
-        status_log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
-        self.status_var = tk.StringVar(value="Esperando inicialización del motor OCR...")
-        status_bar = ttk.Label(status_log_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=2)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 5. Estado y Logs (en la parte inferior del panel izquierdo)
+        status_log_frame = ttk.LabelFrame(left_panel, text="5. Estado y Mensajes", padding="10")
+        status_log_frame.pack(fill=tk.BOTH, expand=True, pady=5, anchor="s") # anchor="s" para que se expanda hacia abajo
+        
+        self.log_text = tk.Text(status_log_frame, height=8, state=tk.DISABLED, wrap=tk.WORD, relief=tk.SUNKEN, borderwidth=1)
+        self.log_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(0,5))
+        # No se necesita scrollbar si el tamaño es fijo y el texto no es muy largo, o añadirlo como antes
+        
         self.api_status_var = tk.StringVar()
         self.api_status_label = ttk.Label(status_log_frame, textvariable=self.api_status_var, relief=tk.SUNKEN, anchor=tk.W, padding=2)
         self.api_status_label.pack(side=tk.BOTTOM, fill=tk.X)
         self._update_api_status_label()
-        log_text_frame = ttk.Frame(status_log_frame)
-        log_text_frame.pack(fill=tk.BOTH, expand=True)
-        self.log_text = tk.Text(log_text_frame, height=10, state=tk.DISABLED, wrap=tk.WORD, relief=tk.SUNKEN, borderwidth=1)
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        log_scrollbar = ttk.Scrollbar(log_text_frame, orient=tk.VERTICAL, command=self.log_text.yview)
-        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.config(yscrollcommand=log_scrollbar.set)
+        
+        self.status_var = tk.StringVar(value="Esperando inicialización del motor OCR...")
+        status_bar = ttk.Label(status_log_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, padding=2)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
         self._add_gui_log_handler()
 
+
     def _add_gui_log_handler(self):
+        # ... (sin cambios) ...
         class GUILogHandler(logging.Handler):
             def __init__(self, text_widget):
                 super().__init__()
@@ -161,6 +180,86 @@ class AppGUI:
         gui_handler.setLevel(logging.INFO) 
         app_logger.addHandler(gui_handler)
 
+
+    def _resize_pil_image(self, pil_image: Image.Image, max_width: int, max_height: int) -> Image.Image:
+        """Redimensiona una imagen PIL manteniendo la proporción para que quepa en max_width/max_height."""
+        img_width, img_height = pil_image.size
+        if img_width == 0 or img_height == 0: return pil_image # Evitar división por cero
+
+        # Calcular ratio para ancho y alto
+        ratio_w = max_width / img_width
+        ratio_h = max_height / img_height
+        # Usar el ratio más pequeño para asegurar que la imagen quepa completamente
+        ratio = min(ratio_w, ratio_h)
+
+        new_width = int(img_width * ratio)
+        new_height = int(img_height * ratio)
+
+        return pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+    def _display_preview_image(self, pil_image: Optional[Image.Image]):
+        """Muestra la imagen PIL en el label de vista previa."""
+        if pil_image:
+            # Esperar a que el widget de la label tenga dimensiones
+            self.preview_image_label.update_idletasks() 
+            preview_width = self.preview_image_label.winfo_width() - 10 # -10 para pequeño padding
+            preview_height = self.preview_image_label.winfo_height() - 10
+            
+            if preview_width <= 1 or preview_height <=1: # Si el widget aún no tiene tamaño
+                app_logger.debug("Widget de vista previa aún no tiene tamaño, usando dimensiones por defecto para escalar.")
+                preview_width = 300 # Un valor por defecto razonable
+                preview_height = 400
+
+            resized_pil_image = self._resize_pil_image(pil_image, preview_width, preview_height)
+            self.current_preview_tk_image = ImageTk.PhotoImage(resized_pil_image)
+            self.preview_image_label.config(image=self.current_preview_tk_image)
+        else:
+            self.preview_image_label.config(image='') # Limpiar vista previa
+            self.current_preview_tk_image = None
+        self.root.update_idletasks()
+
+    def _on_preview_resize(self, event):
+        """Llamado cuando el label de vista previa cambia de tamaño."""
+        if self.current_preview_pil_image:
+            self._display_preview_image(self.current_preview_pil_image)
+
+
+    def _load_and_display_first_pdf_page(self, filepath: str):
+        """Carga la primera página de un PDF y la muestra."""
+        try:
+            poppler_path_setting = settings.POPPLER_PATH if hasattr(settings, 'POPPLER_PATH') else None
+            images = convert_from_path(filepath, first_page=1, last_page=1, poppler_path=poppler_path_setting, dpi=150) # DPI más bajo para vista previa rápida
+            if images:
+                self.current_preview_pil_image = images[0]
+                self._display_preview_image(self.current_preview_pil_image)
+            else:
+                app_logger.warning(f"No se pudo convertir PDF para vista previa: {filepath}")
+                self._display_preview_image(None)
+        except Exception as e:
+            app_logger.error(f"Error al cargar PDF para vista previa '{filepath}': {e}", exc_info=True)
+            self._display_preview_image(None)
+            messagebox.showerror("Error Vista Previa", f"No se pudo cargar la vista previa del PDF:\n{os.path.basename(filepath)}\n\nError: {e}")
+
+
+    def _on_file_select_in_listbox(self, event):
+        """Cuando un archivo es seleccionado en la Listbox, intenta mostrar su vista previa."""
+        widget = event.widget
+        selected_indices = widget.curselection()
+        if selected_indices:
+            selected_index = selected_indices[0]
+            # La listbox almacena nombres de archivo, necesitamos la ruta completa de self.selected_files
+            # Esto asume que el orden en self.selected_files es el mismo que en la listbox.
+            # Sería más robusto si la listbox almacenara las rutas completas o tuviéramos un mapeo.
+            # Por ahora, una simplificación:
+            if selected_index < len(self.selected_files):
+                filepath_to_preview = self.selected_files[selected_index]
+                self._load_and_display_first_pdf_page(filepath_to_preview)
+            else:
+                self._display_preview_image(None)
+        else:
+            self._display_preview_image(None)
+
+
     def _select_files(self):
         if self.is_processing: return
         filepaths = filedialog.askopenfilenames(
@@ -172,37 +271,49 @@ class AppGUI:
             self.selected_files = sorted(list(set(self.selected_files)))
             self._update_files_listbox()
             self.status_var.set(f"{len(self.selected_files)} archivos en lista.")
+            if len(self.selected_files) == 1: # Si solo hay un archivo, mostrarlo
+                self._load_and_display_first_pdf_page(self.selected_files[0])
+            elif len(self.selected_files) > 1:
+                 self._display_preview_image(None) # Limpiar si hay muchos
+                 self.current_preview_pil_image = None
+
 
     def _clear_files(self):
         if self.is_processing: return
         self.selected_files.clear()
         self._update_files_listbox()
         self.status_var.set("Lista de archivos limpiada.")
-        # Opcional: deshabilitar el botón de abrir resultados si se limpia la lista
-        # if self.open_results_button.winfo_exists():
-        #     self.open_results_button.config(state=tk.DISABLED)
+        self._display_preview_image(None) # Limpiar vista previa
+        self.current_preview_pil_image = None
 
 
     def _update_files_listbox(self):
         self.files_listbox.delete(0, tk.END)
-        for fp in self.selected_files:
-            self.files_listbox.insert(tk.END, os.path.basename(fp))
+        for fp_idx, fp in enumerate(self.selected_files):
+            self.files_listbox.insert(tk.END, f"{fp_idx+1}. {os.path.basename(fp)}")
         self.overall_progressbar['value'] = 0
         self.ocr_progressbar['value'] = 0
         self.current_file_var.set("N/A")
         self._update_overall_progress_label(0, len(self.selected_files))
+        if not self.selected_files:
+            self._display_preview_image(None)
+            self.current_preview_pil_image = None
+
 
     def _update_ocr_progress_callback(self, value: int):
+        # ... (sin cambios) ...
         if self.root.winfo_exists():
             self.ocr_progressbar['value'] = value
             self.ocr_progress_var.set(f"{value}%")
             self.root.update_idletasks()
 
     def _update_overall_progress_label(self, current, total):
+        # ... (sin cambios) ...
         percentage = (current / total * 100) if total > 0 else 0
         self.overall_progress_var.set(f"{current}/{total} ({percentage:.0f}%)")
 
     def _toggle_controls(self, processing_state: bool):
+        # ... (ligeramente modificado para incluir radiobuttons) ...
         self.is_processing = processing_state
         state = tk.DISABLED if processing_state else tk.NORMAL
         
@@ -210,53 +321,27 @@ class AppGUI:
         if self.clear_button.winfo_exists(): self.clear_button.config(state=state)
         
         # Deshabilitar también los radiobuttons durante el procesamiento
-        # Iterar sobre los hijos del frame de tipo de documento
-        doc_type_frame_children = []
-        for child_widget in self.root.winfo_children():
-            if isinstance(child_widget, ttk.LabelFrame) and "Tipo de Documento" in child_widget.cget("text"):
-                doc_type_frame_children = child_widget.winfo_children()
-                break
-        
-        for rb_child in doc_type_frame_children:
-            if isinstance(rb_child, ttk.Radiobutton) and rb_child.winfo_exists():
-                rb_child.config(state=state)
+        # Asumiendo que doc_type_frame se guarda como self.doc_type_frame o se accede de otra forma
+        for child in self.root.winfo_children():
+            if isinstance(child, ttk.Frame): # Contenedor principal
+                for sub_child in child.winfo_children(): # Paneles izquierdo/derecho
+                    if isinstance(sub_child, ttk.Frame):
+                        for frame_child in sub_child.winfo_children(): # LabelFrames
+                            if isinstance(frame_child, ttk.LabelFrame) and "Tipo de Documento" in frame_child.cget("text"):
+                                for rb_child in frame_child.winfo_children():
+                                    if isinstance(rb_child, ttk.Radiobutton) and rb_child.winfo_exists():
+                                        rb_child.config(state=state)
+                                break 
 
         if self.process_button.winfo_exists():
             if self.pdf_processor and self.pdf_processor.reader and not processing_state:
                  self.process_button.config(state=tk.NORMAL)
             else:
                 self.process_button.config(state=tk.DISABLED)
-        
-        # El botón de abrir resultados se maneja por separado (se habilita después del primer proceso)
-        # pero también se deshabilita si el procesamiento está activo.
-        if self.open_results_button.winfo_exists():
-            if processing_state: # Si está procesando, deshabilitar
-                self.open_results_button.config(state=tk.DISABLED)
-            elif os.path.isdir(self.file_manager.output_base): # Si no está procesando y la carpeta existe, habilitar
-                 self.open_results_button.config(state=tk.NORMAL)
 
-
-    def _open_results_folder(self):
-        results_path = self.file_manager.output_base
-        
-        if not os.path.isdir(results_path):
-            app_logger.warning(f"La carpeta de resultados '{results_path}' no existe aún.")
-            messagebox.showwarning("Carpeta no encontrada", f"La carpeta de resultados '{results_path}' aún no ha sido creada. Por favor, procese algunos archivos primero.")
-            return
-
-        app_logger.info(f"Abriendo carpeta de resultados: {results_path}")
-        try:
-            if sys.platform == "win32":
-                os.startfile(os.path.realpath(results_path)) # os.path.realpath para manejar rutas relativas/simbólicas
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", os.path.realpath(results_path)])
-            else: 
-                subprocess.Popen(["xdg-open", os.path.realpath(results_path)])
-        except Exception as e:
-            app_logger.error(f"No se pudo abrir la carpeta de resultados '{results_path}': {e}", exc_info=True)
-            messagebox.showerror("Error", f"No se pudo abrir la carpeta de resultados: {e}")
 
     def _start_processing_thread(self):
+        # ... (sin cambios) ...
         if not self.selected_files:
             messagebox.showinfo("Sin Archivos", "Por favor, seleccione archivos PDF primero.")
             return
@@ -272,6 +357,7 @@ class AppGUI:
         
         processing_thread = threading.Thread(target=self._process_files_logic, daemon=True)
         processing_thread.start()
+
 
     def _process_files_logic(self):
         selected_doc_type = self.doc_type_var.get()
@@ -292,72 +378,107 @@ class AppGUI:
                 break
             
             filename = os.path.basename(filepath)
+            # Actualizar vista previa al archivo actual si la GUI aún existe
+            if self.root.winfo_exists():
+                 self.root.after(0, self._load_and_display_first_pdf_page, filepath) # Usar after para actualizar desde hilo
+
             self.current_file_var.set(f"{filename} ({i+1}/{total_files})")
             self.ocr_progressbar['value'] = 0
-            self.ocr_progress_var.set("0%")
-            self._update_overall_progress_label(i, total_files)
-            self.root.update_idletasks()
+            # ... (resto de la lógica de _process_files_logic como en la respuesta anterior,
+            #      incluyendo la llamada a get_data_with_text_ai y get_data_with_vision_ai
+            #      basándose en selected_doc_type y si los datos están completos) ...
+            # Asegúrate de que la lógica de qué IA llamar y cuándo esté bien definida.
 
+            # --- COMIENZO DE LA LÓGICA DE PROCESAMIENTO DETALLADA (como antes) ---
             app_logger.info(f"--- Procesando archivo: {filename} ---")
             self.status_var.set(f"Extrayendo texto de {filename}...")
 
             extracted_text, text_extraction_method = self.pdf_processor.extract_text_from_pdf(filepath, self._update_ocr_progress_callback)
-            if not extracted_text:
-                app_logger.error(f"No se pudo extraer texto de {filename} (método: {text_extraction_method}). Se moverá a fallidos.")
+            if not extracted_text and selected_doc_type == "pendiente_impreso": # Si es impreso y no hay texto, es un problema mayor
+                app_logger.error(f"No se pudo extraer texto de {filename} (tipo impreso, método: {text_extraction_method}). Se moverá a fallidos.")
                 self.file_manager.move_to_failed(filepath)
                 self.overall_progressbar['value'] = i + 1
                 continue
+            elif not extracted_text and selected_doc_type == "entregado_manuscrito":
+                app_logger.warning(f"No se pudo extraer texto OCR de página completa de {filename} (tipo manuscrito). Se intentará con IA de Visión si es posible.")
+                # No continuamos, dejaremos que la IA de Visión lo intente con la imagen.
 
-            app_logger.info(f"Texto extraído de '{filename}' (método: {text_extraction_method}). Analizando...")
-            self.status_var.set(f"Analizando texto de {filename}...")
+            # Actualizar status_var solo si la GUI existe
+            if self.root.winfo_exists(): self.status_var.set(f"Analizando datos de {filename}...")
 
-            extracted_data = self.pdf_processor.extract_printed_data_from_text(extracted_text)
-            final_data_source = "PrintedRegex"
+            # PASO 2: Extracción de datos impresos (ID, Nombre)
+            extracted_data = {}
+            if extracted_text: # Solo intentar regex si hay texto
+                extracted_data = self.pdf_processor.extract_printed_data_from_text(extracted_text)
+            else: # Inicializar con Nones si no hubo texto para regex
+                extracted_data = {"id_type": None, "id_number": None, "acta_no": None}
+
+            final_data_source = "PrintedRegex" if extracted_text else "NoTextForRegex"
+
+
+            # PASO 3: Lógica específica para el número de acta y/o IA de Visión
+            first_page_pil_image = None # Para IA de visión o HTR de ROI
 
             if selected_doc_type == "entregado_manuscrito":
-                app_logger.info(f"Documento tipo 'Entregado con Manuscrito'. Buscando acta manuscrita para {filename}...")
-                first_page_pil_image = None
+                app_logger.info(f"Documento tipo 'Entregado con Manuscrito' para {filename}.")
                 try:
                     poppler_path_setting = settings.POPPLER_PATH if hasattr(settings, 'POPPLER_PATH') else None
-                    temp_images = convert_from_path(filepath, first_page=1, last_page=1, poppler_path=poppler_path_setting)
+                    temp_images = convert_from_path(filepath, first_page=1, last_page=1, poppler_path=poppler_path_setting, dpi=200) # Mejor DPI para HTR/Visión
                     if temp_images:
                         first_page_pil_image = temp_images[0]
                 except Exception as e_img_load:
-                    app_logger.error(f"No se pudo cargar imagen para acta manuscrita de {filename}: {e_img_load}", exc_info=True)
+                    app_logger.error(f"No se pudo cargar imagen para acta manuscrita/visión de {filename}: {e_img_load}", exc_info=True)
 
                 if first_page_pil_image:
-                    handwritten_acta = self.pdf_processor.extract_handwritten_acta_number(first_page_pil_image)
-                    if handwritten_acta:
-                        extracted_data["acta_no"] = handwritten_acta 
-                        final_data_source += "/HandwrittenActa"
-                        app_logger.info(f"Número de acta manuscrito '{handwritten_acta}' encontrado y usado para {filename}.")
+                    # Intento 1 para "entregado_manuscrito": HTR de ROI
+                    handwritten_acta_roi = self.pdf_processor.extract_handwritten_acta_number(first_page_pil_image)
+                    if handwritten_acta_roi:
+                        extracted_data["acta_no"] = handwritten_acta_roi
+                        final_data_source += "/HandwrittenROI"
+                        app_logger.info(f"Número de acta de ROI manuscrita '{handwritten_acta_roi}' usado para {filename}.")
+                    
+                    # Intento 2 para "entregado_manuscrito": IA de Visión (si ROI HTR falló o para todos los campos)
+                    # Decidimos si usar Vision AI siempre o como fallback. Aquí como fallback si datos incompletos.
+                    data_complete_after_roi = all(extracted_data.get(key) for key in ["id_type", "id_number", "acta_no"])
+                    if (not data_complete_after_roi or extracted_data.get("acta_no") is None) and \
+                       self.ai_integrator.is_api_configured_and_client_valid() and self.ai_integrator.vision_model_name:
+                        
+                        if self.root.winfo_exists(): self.status_var.set(f"Consultando IA de Visión para {filename}...")
+                        vision_ai_data = self.ai_integrator.get_data_with_vision_ai(first_page_pil_image, filename)
+                        if vision_ai_data:
+                            app_logger.info(f"IA de Visión devolvió: {vision_ai_data}")
+                            # La IA de visión podría rellenar todos los campos.
+                            # Darle prioridad si devuelve algo.
+                            for key_v in ["id_type", "id_number", "acta_no"]:
+                                if vision_ai_data.get(key_v) is not None:
+                                    extracted_data[key_v] = vision_ai_data.get(key_v)
+                            final_data_source = "VisionAI" # Asumir que si se usa, es la fuente principal
+                            app_logger.info(f"Datos para '{filename}' actualizados por IA de Visión: {extracted_data}")
+                        else:
+                            app_logger.warning(f"IA de Visión no pudo extraer datos para {filename}.")
+                else:
+                    app_logger.warning(f"No se pudo obtener imagen para HTR/Visión en {filename} (tipo manuscrito).")
+
+            # PASO 4: Fallback a IA de Texto si los datos siguen incompletos (para ambos tipos de doc)
+            data_complete_before_text_ai = all(extracted_data.get(key) for key in ["id_type", "id_number", "acta_no"])
+
+            if not data_complete_before_text_ai and self.ai_integrator.is_api_configured_and_client_valid() and self.ai_integrator.text_model_name:
+                if not extracted_text:
+                    app_logger.warning(f"No hay texto OCR de página completa para enviar a IA de texto para {filename}. Omitiendo IA de texto.")
+                else:
+                    if self.root.winfo_exists(): self.status_var.set(f"Consultando IA de texto para {filename}...")
+                    ai_text_data = self.ai_integrator.get_data_with_text_ai(extracted_text, filename)
+                    if ai_text_data:
+                        app_logger.info(f"IA de Texto devolvió: {ai_text_data}")
+                        for key_t in ["id_type", "id_number", "acta_no"]:
+                            if ai_text_data.get(key_t) is not None and extracted_data.get(key_t) is None: # Solo rellenar si estaba vacío
+                                extracted_data[key_t] = ai_text_data.get(key_t)
+                                final_data_source += "+TextAIComplement"
+                        app_logger.info(f"Datos para '{filename}' complementados por IA de texto: {extracted_data}")
                     else:
-                        app_logger.warning(f"No se encontró número de acta manuscrito para {filename}. Se usará el de datos impresos si existe: '{extracted_data.get('acta_no')}'.")
-                else:
-                    app_logger.warning(f"No se pudo obtener imagen para buscar acta manuscrita en {filename}.")
+                        app_logger.warning(f"IA de texto no pudo extraer/mejorar datos para {filename}.")
             
-            elif selected_doc_type == "pendiente_impreso":
-                app_logger.info(f"Documento tipo 'Pendiente Entregado'. Usando acta_no de datos impresos: '{extracted_data.get('acta_no')}'.")
-
-            data_complete_before_ai = all(extracted_data.get(key) for key in ["id_type", "id_number", "acta_no"])
-
-            if not data_complete_before_ai and self.ai_integrator.is_api_configured_and_client_valid():
-                app_logger.info(f"Datos incompletos para '{filename}' ({extracted_data}). Intentando con IA de texto...")
-                self.status_var.set(f"Consultando IA de texto para {filename}...")
-                ai_text_data = self.ai_integrator.get_data_with_text_ai(extracted_text, filename)
-                
-                if ai_text_data:
-                    updated_by_ai = False
-                    for key in ["id_type", "id_number", "acta_no"]:
-                        if ai_text_data.get(key) is not None and (extracted_data.get(key) is None or ai_text_data.get(key) != extracted_data.get(key)):
-                            extracted_data[key] = ai_text_data[key]
-                            updated_by_ai = True
-                    if updated_by_ai:
-                        final_data_source += "+TextAI"
-                        app_logger.info(f"Datos para '{filename}' actualizados/complementados por IA de texto: {extracted_data}")
-                else:
-                    app_logger.warning(f"IA de texto no devolvió datos o falló para '{filename}'.")
-
+            # PASO 5: Verificación final y renombrado
             new_filename_base = self.file_manager.generate_new_filename(
                 extracted_data.get("id_type"),
                 extracted_data.get("id_number"),
@@ -367,26 +488,25 @@ class AppGUI:
 
             if new_filename_base:
                 app_logger.info(f"Datos finales para '{filename}' (fuente: {final_data_source}): {extracted_data}. Nuevo nombre: {new_filename_base}")
-                self.status_var.set(f"Renombrando {filename}...")
+                if self.root.winfo_exists(): self.status_var.set(f"Renombrando {filename}...")
                 self.file_manager.copy_and_rename(filepath, new_filename_base)
             else:
-                app_logger.error(f"No se pudo generar un nombre de archivo válido para '{filename}' debido a datos cruciales faltantes. Moviendo a fallidos. Datos: {extracted_data}")
+                app_logger.error(f"No se pudo generar un nombre de archivo válido para '{filename}' (datos cruciales faltantes). Moviendo a fallidos. Datos: {extracted_data}")
                 self.file_manager.move_to_failed(filepath)
             
-            self.overall_progressbar['value'] = i + 1
+            if self.root.winfo_exists(): self.overall_progressbar['value'] = i + 1
             self._update_overall_progress_label(i + 1, total_files)
+            # --- FIN DE LA LÓGICA DE PROCESAMIENTO DETALLADA ---
 
+
+        # Fin del bucle de procesamiento
         if self.root.winfo_exists():
-            self._toggle_controls(False) # Esto ahora también considera el botón de abrir resultados
+            self._toggle_controls(False)
             self.status_var.set(f"Procesamiento completado. {total_files} archivos procesados.")
             self.current_file_var.set("N/A")
             self._update_overall_progress_label(total_files, total_files)
-            messagebox.showinfo("Completado", 
-                                f"Procesamiento finalizado.\n"
-                                f"Archivos renombrados en: {self.file_manager.renamed_dir}\n"
-                                f"Archivos fallidos en: {self.file_manager.failed_dir}\n\n"
-                                f"Puede abrir la carpeta de resultados usando el botón.")
+            messagebox.showinfo("Completado", f"Procesamiento finalizado.\nArchivos renombrados en: {self.file_manager.renamed_dir}\nArchivos fallidos en: {self.file_manager.failed_dir}")
             self.selected_files.clear()
-            self._update_files_listbox()
+            self._update_files_listbox() # Esto limpiará la vista previa también
         else:
             app_logger.info("Procesamiento completado pero la ventana de GUI ya no existe.")
