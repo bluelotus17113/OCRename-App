@@ -1,6 +1,7 @@
 import easyocr
 import re
-import os 
+import os
+import time
 from PyPDF2 import PdfReader
 from pdf2image import convert_from_path
 from typing import Optional, Tuple, Dict, Callable
@@ -123,13 +124,22 @@ class PDFProcessor:
         full_ocr_text = []; app_logger.debug(f"Iniciando OCR para {pdf_path}")
         try:
             pop_path = settings.POPPLER_PATH if settings and hasattr(settings, 'POPPLER_PATH') else None
-            images = convert_from_path(pdf_path, poppler_path=pop_path); app_logger.debug(f"PDF '{pdf_path}' -> {len(images)} imágenes.")
+            # Procesar solo la primera página para OCR
+            start_time = time.time()
+            images = convert_from_path(pdf_path, poppler_path=pop_path, first_page=1, last_page=1, dpi=200); 
+            duration = time.time() - start_time
+            app_logger.debug(f"PDF to images conversion took {duration:.2f} seconds.")
+            app_logger.debug(f"PDF '{pdf_path}' -> {len(images)} imágenes (solo primera página para OCR).")
             num_images = len(images)
             for i, pil_img in enumerate(images):
                 p_num = i + 1; app_logger.debug(f"OCR pág {p_num}/{num_images} de '{pdf_path}'")
                 img_np = np.array(pil_img.convert('RGB')); img_ocr = self._preprocess_full_page_image_for_ocr(img_np)
                 app_logger.debug(f"Img OCR pág {p_num}: tipo={type(img_ocr)}, shape={img_ocr.shape if isinstance(img_ocr, np.ndarray) else 'N/A'}")
-                res_page = self.reader.readtext(img_ocr, detail=0, paragraph=True); app_logger.debug(f"Res OCR pág {p_num}: {res_page}")
+                ocr_start_time = time.time()
+                res_page = self.reader.readtext(img_ocr, detail=0, paragraph=True); 
+                ocr_duration = time.time() - ocr_start_time
+                app_logger.debug(f"OCR for page {p_num} took {ocr_duration:.2f} seconds.")
+                app_logger.debug(f"Res OCR pág {p_num}: {res_page}")
                 if res_page: full_ocr_text.extend(res_page)
                 prog_ocr = 50 + int(((i + 1) / num_images) * 50);
                 if progress_callback: progress_callback(prog_ocr)

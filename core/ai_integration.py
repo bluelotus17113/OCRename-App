@@ -77,6 +77,7 @@ class AIIntegrator:
 
         for attempt in range(max_retries):
             try:
+                api_start_time = time.time()
                 completion = self.client.chat.completions.create( # Asignar a completion
                     model=model_name,
                     messages=messages_payload,
@@ -84,6 +85,8 @@ class AIIntegrator:
                     max_tokens=350,
                     extra_headers=extra_headers,
                 )
+                api_duration = time.time() - api_start_time
+                app_logger.debug(f"API call to {model_name} took {api_duration:.2f} seconds.")
                 
                 # Verificar si completion y sus atributos necesarios existen antes de acceder
                 if completion and completion.choices and len(completion.choices) > 0 and completion.choices[0].message:
@@ -170,6 +173,22 @@ class AIIntegrator:
             return None
 
         try:
+            # Optimizar imagen para Vision AI
+            max_dim = 1280
+            width, height = pil_image_obj.size
+            
+            if width > max_dim or height > max_dim:
+                app_logger.debug(f"Imagen original ({width}x{height}) excede max_dim ({max_dim}). Redimensionando...")
+                if width > height:
+                    new_width = max_dim
+                    new_height = int(height * (max_dim / width))
+                else:
+                    new_height = max_dim
+                    new_width = int(width * (max_dim / height))
+                
+                pil_image_obj = pil_image_obj.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                app_logger.debug(f"Imagen redimensionada a {new_width}x{new_height}.")
+            
             buffered = BytesIO()
             pil_image_obj.save(buffered, format="PNG") 
             img_str_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
